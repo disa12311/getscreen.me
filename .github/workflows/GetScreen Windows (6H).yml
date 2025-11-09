@@ -96,13 +96,8 @@ jobs:
         
       - name: Setup Workspace
         run: |
-          $workspace = "$env:TEMP\workspace"
-          New-Item -ItemType Directory -Force -Path $workspace | Out-Null
-          
-          echo "WORKSPACE=$workspace" >> $env:GITHUB_ENV
           echo "START_TIME=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" >> $env:GITHUB_ENV
-          
-          Write-Host "`n✓ Workspace created: $workspace" -ForegroundColor Green
+          Write-Host "`n✓ Workspace ready" -ForegroundColor Green
         shell: pwsh
         
       - name: Download Script
