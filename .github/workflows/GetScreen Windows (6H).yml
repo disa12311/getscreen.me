@@ -1,18 +1,209 @@
-name: GetScreen Windows (6H
+name: GetScreen Windows (Enhanced)
 
 on:
   workflow_dispatch:
 
+env:
+  PYTHON_VERSION: '3.11'
+  RUNTIME_HOURS: '24'  # Thay đổi thời gian chạy tại đây
+
 jobs:
   build:
     runs-on: windows-latest
-
+    timeout-minutes: 360  # 6 hours timeout
+    
     steps:
-      - name: Downloading & Setting Up
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: Load Environment Variables
         run: |
-         echo "EMAIL_SECRET=hadiepml@gmail.com" > secrets.txt
-         Invoke-WebRequest -Uri "https://www.dropbox.com/scl/fi/gdzoens68gz1o4wuwtf0x/down.bat?rlkey=wd1ecn33dv9yn2uvdyynavbs6&dl=1" -OutFile "down.bat"
-         cmd /c down.bat
-
-      - name: Time Counter
-        run: python time.py
+          # Kiểm tra và load .env file nếu tồn tại
+          if (Test-Path ".env") {
+            Write-Host "Loading .env file..." -ForegroundColor Cyan
+            Get-Content .env | ForEach-Object {
+              if ($_ -match '^([^#][^=]+)=(.*)$') {
+                $name = $matches[1].Trim()
+                $value = $matches[2].Trim()
+                echo "$name=$value" >> $env:GITHUB_ENV
+                Write-Host "Loaded: $name" -ForegroundColor Green
+              }
+            }
+          } else {
+            Write-Host ".env file not found, using default values" -ForegroundColor Yellow
+          }
+        shell: pwsh
+        
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests psutil
+        shell: pwsh
+        
+      - name: System Information
+        run: |
+          Write-Host "=== System Information ===" -ForegroundColor Cyan
+          Write-Host "OS: $(Get-WmiObject -Class Win32_OperatingSystem | Select-Object -ExpandProperty Caption)"
+          Write-Host "CPU: $(Get-WmiObject -Class Win32_Processor | Select-Object -ExpandProperty Name)"
+          Write-Host "RAM: $([math]::Round((Get-WmiObject -Class Win32_ComputerSystem).TotalPhysicalMemory/1GB, 2)) GB"
+          Write-Host "Disk: $([math]::Round((Get-PSDrive C | Select-Object -ExpandProperty Free)/1GB, 2)) GB free"
+          Write-Host "PowerShell: $($PSVersionTable.PSVersion.ToString())"
+          Write-Host "Python: $(python --version)"
+        shell: pwsh
+        
+      - name: Setup Environment
+        run: |
+          # Tạo thư mục làm việc
+          New-Item -ItemType Directory -Force -Path "$env:TEMP\workspace"
+          
+          # Lưu thông tin vào environment variables
+          echo "WORKSPACE=$env:TEMP\workspace" >> $env:GITHUB_ENV
+          echo "START_TIME=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" >> $env:GITHUB_ENV
+          
+          # Hiển thị cấu hình
+          Write-Host "`n=== Configuration ===" -ForegroundColor Cyan
+          Write-Host "Runtime Hours: ${{ env.RUNTIME_HOURS }}" -ForegroundColor Green
+          if ($env:EMAIL_SECRET) {
+            Write-Host "Email: $env:EMAIL_SECRET" -ForegroundColor Green
+          }
+          if ($env:DOWNLOAD_URL) {
+            Write-Host "Download URL: Configured" -ForegroundColor Green
+          }
+        shell: pwsh
+        
+      - name: Download and Execute Script
+        run: |
+          try {
+            Write-Host "Downloading script..." -ForegroundColor Yellow
+            
+            # Sử dụng URL từ .env hoặc mặc định
+            $downloadUrl = if ($env:DOWNLOAD_URL) { $env:DOWNLOAD_URL } else {
+              "https://www.dropbox.com/scl/fi/gdzoens68gz1o4wuwtf0x/down.bat?rlkey=wd1ecn33dv9yn2uvdyynavbs6&dl=1"
+            }
+            
+            $outputPath = "$env:TEMP\workspace\down.bat"
+            
+            # Download với retry logic
+            $maxRetries = 3
+            $retryCount = 0
+            $downloaded = $false
+            
+            while (-not $downloaded -and $retryCount -lt $maxRetries) {
+              try {
+                Invoke-WebRequest -Uri $downloadUrl -OutFile $outputPath -TimeoutSec 30
+                $downloaded = $true
+                Write-Host "Download successful!" -ForegroundColor Green
+              } catch {
+                $retryCount++
+                Write-Host "Download attempt $retryCount failed. Retrying..." -ForegroundColor Red
+                Start-Sleep -Seconds 5
+              }
+            }
+            
+            if (-not $downloaded) {
+              throw "Failed to download after $maxRetries attempts"
+            }
+            
+            # Verify file
+            if (Test-Path $outputPath) {
+              $fileSize = (Get-Item $outputPath).Length
+              Write-Host "File size: $fileSize bytes" -ForegroundColor Cyan
+              
+              # Execute
+              Write-Host "Executing script..." -ForegroundColor Yellow
+              cmd /c $outputPath
+            } else {
+              throw "Downloaded file not found"
+            }
+            
+          } catch {
+            Write-Host "Error: $_" -ForegroundColor Red
+            exit 1
+          }
+        shell: pwsh
+        
+      - name: Run Time Counter with Monitoring
+        run: |
+          # Tạo script Python cải tiến
+          @"
+          import time
+          import sys
+          import os
+          from datetime import datetime, timedelta
+          
+          def format_time(seconds):
+              hours = seconds // 3600
+              minutes = (seconds % 3600) // 60
+              secs = seconds % 60
+              return f"{int(hours):02d}:{int(minutes):02d}:{int(secs):02d}"
+          
+          def main():
+              duration_hours = float(os.environ.get('RUNTIME_HOURS', '6'))
+              total_seconds = int(duration_hours * 3600)
+              start_time = datetime.now()
+              end_time = start_time + timedelta(seconds=total_seconds)
+              
+              print(f"⏰ Started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+              print(f"⏰ Will end at: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+              print(f"⏱️  Duration: {duration_hours} hours")
+              print("-" * 50)
+              
+              elapsed = 0
+              checkpoint_interval = 300  # 5 minutes
+              last_checkpoint = 0
+              
+              try:
+                  while elapsed < total_seconds:
+                      remaining = total_seconds - elapsed
+                      progress = (elapsed / total_seconds) * 100
+                      
+                      # Update display
+                      sys.stdout.write(f"\r⏳ Elapsed: {format_time(elapsed)} | "
+                                     f"Remaining: {format_time(remaining)} | "
+                                     f"Progress: {progress:.1f}%")
+                      sys.stdout.flush()
+                      
+                      # Checkpoint every 5 minutes
+                      if elapsed - last_checkpoint >= checkpoint_interval:
+                          print(f"\n✓ Checkpoint: {format_time(elapsed)} elapsed")
+                          last_checkpoint = elapsed
+                      
+                      time.sleep(60)  # Update every minute
+                      elapsed += 60
+                      
+              except KeyboardInterrupt:
+                  print("\n\n⚠️  Interrupted by user")
+                  sys.exit(0)
+              
+              print(f"\n\n✅ Completed! Total runtime: {format_time(elapsed)}")
+          
+          if __name__ == "__main__":
+              main()
+          "@ | Out-File -FilePath "time.py" -Encoding UTF8
+          
+          # Run the script
+          python time.py
+        shell: pwsh
+        
+      - name: Cleanup
+        if: always()
+        run: |
+          Write-Host "Cleaning up..." -ForegroundColor Yellow
+          Remove-Item -Path "$env:TEMP\workspace" -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host "Cleanup completed" -ForegroundColor Green
+        shell: pwsh
+        
+      - name: Summary
+        if: always()
+        run: |
+          Write-Host "`n=== Workflow Summary ===" -ForegroundColor Cyan
+          Write-Host "Start Time: $env:START_TIME"
+          Write-Host "End Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+          Write-Host "Status: ${{ job.status }}"
+        shell: pwsh
